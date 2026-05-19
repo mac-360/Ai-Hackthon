@@ -1,0 +1,27 @@
+{
+  "data_root": "data/competition_data/competition_data",
+  "external_root": "data/external/mendeley_root/Root/Type_01_(Raw_Gesture)",
+  "contest_dir": "data/contest/test",
+  "out_dir": "models/shift_robust",
+  "models": [
+    "convnext_tiny",
+    "tf_efficientnetv2_s"
+  ],
+  "img_size": 256,
+  "epochs": 4,
+  "batch_size": 256,
+  "lr": 0.0003,
+  "finetune_lr": 6e-05,
+  "weight_decay": 0.05,
+  "label_smoothing": 0.05,
+  "val_fraction": 0.1,
+  "external_val_fraction": 0.04,
+  "external_per_class": 2500,
+  "steps_per_epoch": 320,
+  "workers": 8,
+  "seed": 42,
+  "original_batch_fraction": 0.65,
+  "tta_passes": 3,
+  "init_checkpoint": "app/best_model.pt",
+  "skip_infer": false
+}

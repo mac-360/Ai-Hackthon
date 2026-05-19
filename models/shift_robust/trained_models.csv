@@ -1,0 +1,3 @@
+model_name,tag,checkpoint,history
+convnext_tiny,convnext_tiny,models/shift_robust/best_convnext_tiny.pt,models/shift_robust/history_convnext_tiny.csv
+tf_efficientnetv2_s,tf_efficientnetv2_s,models/shift_robust/best_tf_efficientnetv2_s.pt,models/shift_robust/history_tf_efficientnetv2_s.csv

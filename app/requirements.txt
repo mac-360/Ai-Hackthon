@@ -1,0 +1,30 @@
+# The Silent Gap — ASL Sign Detector & Translator (Streamlit app)
+# Verified on Python 3.13.  Install:  pip install -r app/requirements.txt
+#                           Run:      streamlit run app/app.py
+#
+# This single file works both locally and on Hugging Face Spaces — the
+# MediaPipe line below is skipped automatically where there is no wheel.
+
+# --- core: model + UI ---
+streamlit>=1.40
+torch>=2.4                 # needs torch.amp.GradScaler (PyTorch 2.4+)
+torchvision>=0.19
+timm>=1.0
+numpy>=1.24
+pandas>=2.0
+pillow>=10.0
+
+# --- webcam, video & hand detection ---
+streamlit-webrtc>=0.47
+av>=11.0
+opencv-python-headless>=4.8
+
+# --- speech-to-text & English<->Urdu translation ---
+streamlit-mic-recorder>=0.0.8
+deep-translator>=1.11
+
+# --- optional: automatic hand tracking ---
+# MediaPipe has no Python 3.13 wheel; pip installs it only where supported
+# (e.g. the Python 3.11 Hugging Face Space). Without it the app falls back
+# to OpenCV skin-segmentation hand detection.
+mediapipe>=0.10 ; python_version < "3.13"

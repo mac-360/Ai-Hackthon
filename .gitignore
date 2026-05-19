@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.streamlit/
+.DS_Store
+*.log
+_test_clip.avi
+data/
+*.zip
