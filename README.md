@@ -21,6 +21,13 @@ pip install -r app/requirements.txt
 streamlit run app/app.py
 ```
 
+## Optional Kokoro TTS
+
+English speech uses Kokoro TTS when the local model files exist at
+`app/kokoro_models/kokoro-v1.0.onnx` and
+`app/kokoro_models/voices-v1.0.bin`. Without them, or for unsupported
+languages, the app falls back to browser speech.
+
 The app defaults to OpenCV hand detection because some hosted notebook
 runtimes crash during native MediaPipe import. On a local machine where
 MediaPipe is stable, run:

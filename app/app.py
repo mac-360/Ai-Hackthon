@@ -15,6 +15,8 @@ import random
 import hashlib
 import tempfile
 import threading
+import base64
+import json
 from collections import deque, Counter
 from html import escape
 
@@ -61,6 +63,16 @@ try:
 except Exception:
     TRANSLATE_OK = False
 
+# --- optional: offline Kokoro text-to-speech ------------------------------
+try:
+    import soundfile as sf
+    from kokoro_onnx import Kokoro
+    KOKORO_IMPORT_OK = True
+except Exception:
+    sf = None
+    Kokoro = None
+    KOKORO_IMPORT_OK = False
+
 st.set_page_config(page_title='ASL Sign Detector', page_icon='🤟', layout='wide')
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -75,6 +87,27 @@ ARCH_CANDIDATES = ['convnext_tiny', 'convnext_base', 'convnextv2_base',
 # so the app works no matter which directory it is launched from.
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REFERENCE_DIR = os.path.join(APP_DIR, 'reference_signs')
+KOKORO_DIR = os.environ.get('ASL_KOKORO_DIR',
+                            os.path.join(APP_DIR, 'kokoro_models'))
+KOKORO_MODEL_PATH = os.environ.get(
+    'ASL_KOKORO_MODEL',
+    os.path.join(KOKORO_DIR, 'kokoro-v1.0.onnx'),
+)
+KOKORO_VOICES_PATH = os.environ.get(
+    'ASL_KOKORO_VOICES',
+    os.path.join(KOKORO_DIR, 'voices-v1.0.bin'),
+)
+KOKORO_VOICE_CHOICES = [
+    'af_sarah', 'af_bella', 'af_heart', 'af_nova', 'af_sky',
+    'am_adam', 'am_echo', 'am_eric', 'am_michael',
+    'bf_emma', 'bf_alice', 'bm_daniel', 'bm_george',
+]
+KOKORO_VOICE = os.environ.get('ASL_KOKORO_VOICE', 'af_sarah')
+try:
+    KOKORO_SPEED = float(os.environ.get('ASL_KOKORO_SPEED', '0.95'))
+except ValueError:
+    KOKORO_SPEED = 0.95
+KOKORO_SPEED = max(0.75, min(1.25, KOKORO_SPEED))
 
 
 def pretty(label):
@@ -336,20 +369,106 @@ class SignWordProcessor:
 
 
 # ==========================================================================
-# Text-to-speech (browser Web Speech API)
+# Text-to-speech (Kokoro first, browser Web Speech fallback)
 # ==========================================================================
-def speak(text, lang='en-US'):
-    text = (text or '').replace('\\', ' ').replace('"', ' ').replace("'", ' ')
-    if not text.strip():
-        return
+def kokoro_ready():
+    return (KOKORO_IMPORT_OK and
+            os.path.exists(KOKORO_MODEL_PATH) and
+            os.path.exists(KOKORO_VOICES_PATH))
+
+
+def kokoro_lang_for(lang):
+    lang = (lang or 'en-US').lower()
+    if lang.startswith('en-gb') or lang == 'en-gb':
+        return 'en-gb'
+    if lang.startswith('en'):
+        return 'en-us'
+    return None
+
+
+@st.cache_resource(show_spinner='Loading Kokoro TTS...')
+def load_kokoro(model_path, voices_path):
+    return Kokoro(model_path, voices_path)
+
+
+def split_tts_text(text, limit=420):
+    text = ' '.join((text or '').split())
+    if len(text) <= limit:
+        return [text] if text else []
+    chunks, current = [], ''
+    for part in text.replace('?', '?.').replace('!', '!.').split('.'):
+        part = part.strip()
+        if not part:
+            continue
+        if len(current) + len(part) + 2 <= limit:
+            current = f'{current}. {part}' if current else part
+        else:
+            if current:
+                chunks.append(current)
+            current = part
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def kokoro_audio_bytes(text, lang, voice, speed, model_path, voices_path):
+    kokoro = load_kokoro(model_path, voices_path)
+    all_samples = []
+    sample_rate = None
+    for chunk in split_tts_text(text):
+        samples, sr = kokoro.create(chunk, voice=voice, speed=speed, lang=lang)
+        if sample_rate is None:
+            sample_rate = sr
+        all_samples.extend(samples)
+        all_samples.extend(np.zeros(int(sr * 0.08), dtype=np.float32))
+    if not all_samples or sample_rate is None:
+        return b''
+    buf = io.BytesIO()
+    sf.write(buf, np.asarray(all_samples, dtype=np.float32), sample_rate,
+             format='WAV')
+    return buf.getvalue()
+
+
+def play_audio_bytes(audio_bytes):
+    encoded = base64.b64encode(audio_bytes).decode('ascii')
+    components.html(
+        f"""<audio autoplay>
+        <source src="data:audio/wav;base64,{encoded}" type="audio/wav">
+        </audio>""",
+        height=0,
+    )
+
+
+def browser_speak(text, lang='en-US'):
     components.html(
         f"""<script>
-        const u = new SpeechSynthesisUtterance("{text}");
-        u.lang = "{lang}";
+        const u = new SpeechSynthesisUtterance({json.dumps(text)});
+        u.lang = {json.dumps(lang)};
         u.rate = 0.9;
         window.speechSynthesis.cancel();
         window.speechSynthesis.speak(u);
         </script>""", height=0)
+
+
+def speak(text, lang='en-US'):
+    text = ' '.join((text or '').replace('\\', ' ').split())
+    if not text:
+        return
+    kokoro_lang = kokoro_lang_for(lang)
+    if kokoro_lang and kokoro_ready():
+        try:
+            with st.spinner('Generating speech with Kokoro...'):
+                audio = kokoro_audio_bytes(text, kokoro_lang, KOKORO_VOICE,
+                                           float(KOKORO_SPEED),
+                                           KOKORO_MODEL_PATH,
+                                           KOKORO_VOICES_PATH)
+            if audio:
+                play_audio_bytes(audio)
+                return
+        except Exception as exc:
+            st.warning(f'Kokoro TTS failed; using browser speech. ({exc})')
+    browser_speak(text, lang)
 
 
 @st.cache_data(show_spinner=False)
@@ -378,36 +497,61 @@ def inject_theme():
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Nastaliq+Urdu:wght@400;700&display=swap');
     :root {
-        --ink: #172026;
-        --muted: #64727d;
-        --line: #dce4ea;
-        --paper: #ffffff;
-        --wash: #f6f8fb;
-        --blue: #1769aa;
-        --teal: #0f8b8d;
-        --green: #238636;
-        --amber: #b7791f;
-        --red: #b42318;
+        --ink: #f4f7fb;
+        --muted: #9aa8b8;
+        --line: #253244;
+        --paper: #131b27;
+        --paper-2: #0f1621;
+        --wash: #080d14;
+        --blue: #58a6ff;
+        --teal: #2dd4bf;
+        --green: #57d68d;
+        --amber: #f2b84b;
+        --red: #ff5a67;
     }
     html, body, [class*="css"] {
         font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    html, body, .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"],
+    [data-testid="stToolbar"] {
+        background: var(--wash) !important;
+        color: var(--ink) !important;
     }
     .block-container {
         max-width: 1240px;
         padding-top: 1.2rem;
         padding-bottom: 2.5rem;
     }
-    [data-testid="stSidebar"] {
-        background: #f5f8fb;
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarContent"] {
+        background: #0b111a !important;
         border-right: 1px solid var(--line);
     }
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebarContent"] * {
+        color: var(--ink);
+    }
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] div,
+    .stCaptionContainer {
+        color: var(--muted);
+    }
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3 {
+        color: var(--ink);
+    }
     .hero {
-        background: linear-gradient(135deg, #102338 0%, #0d4f5f 52%, #166a6f 100%);
+        background: linear-gradient(135deg, #102338 0%, #0f4d59 52%, #136463 100%);
         color: white;
         border-radius: 8px;
         padding: 1.35rem 1.45rem;
         margin-bottom: 1rem;
-        box-shadow: 0 18px 44px rgba(16, 35, 56, .18);
+        box-shadow: 0 18px 44px rgba(0, 0, 0, .34);
     }
     .hero h1 {
         margin: 0 0 .25rem 0;
@@ -468,7 +612,7 @@ def inject_theme():
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: .9rem;
-        box-shadow: 0 10px 28px rgba(23, 32, 38, .06);
+        box-shadow: 0 12px 30px rgba(0, 0, 0, .28);
     }
     .status-card .label {
         color: var(--muted);
@@ -497,15 +641,15 @@ def inject_theme():
     }
     .pill {
         border: 1px solid var(--line);
-        background: #f9fbfd;
-        color: #31424f;
+        background: #101826;
+        color: var(--ink);
         border-radius: 999px;
         padding: .3rem .58rem;
         font-size: .8rem;
         font-weight: 650;
     }
-    .pill.good { border-color: #b7e2c0; color: var(--green); background: #f1fbf3; }
-    .pill.warn { border-color: #efd08c; color: var(--amber); background: #fff9e8; }
+    .pill.good { border-color: rgba(87, 214, 141, .45); color: var(--green); background: rgba(87, 214, 141, .11); }
+    .pill.warn { border-color: rgba(242, 184, 75, .45); color: var(--amber); background: rgba(242, 184, 75, .12); }
     .prediction {
         text-align: center;
         padding: .75rem 0 .55rem;
@@ -526,7 +670,7 @@ def inject_theme():
     }
     .confidence-track {
         height: .62rem;
-        background: #e8edf2;
+        background: #1e2a3a;
         border-radius: 999px;
         overflow: hidden;
         margin: .65rem 0 .25rem;
@@ -542,27 +686,27 @@ def inject_theme():
         gap: .55rem;
         align-items: center;
         margin: .42rem 0;
-        color: #2d3b45;
+        color: var(--ink);
         font-size: .9rem;
     }
     .prob-track {
         height: .48rem;
-        background: #e9eef3;
+        background: #1e2a3a;
         border-radius: 999px;
         overflow: hidden;
     }
     .prob-fill {
         height: 100%;
-        background: #1769aa;
+        background: var(--blue);
         border-radius: 999px;
     }
     .empty-card {
         border-style: dashed;
-        background: #fbfcfe;
+        background: var(--paper-2);
         color: var(--muted);
     }
     .large-output {
-        background: #f5f9fb;
+        background: var(--paper);
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 1rem;
@@ -577,6 +721,83 @@ def inject_theme():
     }
     div[data-testid="stTabs"] button {
         font-weight: 650;
+    }
+    div[data-testid="stTabs"] [role="tab"] {
+        color: var(--ink);
+    }
+    div[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+        color: var(--red);
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-border"] {
+        background-color: var(--line);
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+        background-color: var(--red);
+    }
+    .stMarkdown, .stText, .stCaptionContainer, p, li, label,
+    [data-testid="stMarkdownContainer"] {
+        color: var(--muted);
+    }
+    h1, h2, h3, h4, h5, h6,
+    strong,
+    [data-testid="stMarkdownContainer"] strong {
+        color: var(--ink);
+    }
+    [data-testid="stAlert"],
+    [data-testid="stNotificationContentInfo"],
+    [data-testid="stNotificationContentSuccess"],
+    [data-testid="stNotificationContentWarning"] {
+        background: #111c2b;
+        border: 1px solid var(--line);
+        color: var(--ink);
+    }
+    [data-testid="stAlert"] *,
+    [data-testid="stNotificationContentInfo"] *,
+    [data-testid="stNotificationContentSuccess"] *,
+    [data-testid="stNotificationContentWarning"] * {
+        color: var(--ink);
+    }
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stFileUploader"] section,
+    [data-testid="stRadio"] div[role="radiogroup"],
+    [data-testid="stCheckbox"] label {
+        background: #101826 !important;
+        border-color: var(--line) !important;
+        color: var(--ink) !important;
+    }
+    [data-testid="stSelectbox"] *,
+    [data-testid="stTextInput"] *,
+    [data-testid="stTextArea"] *,
+    [data-testid="stNumberInput"] *,
+    [data-testid="stFileUploader"] *,
+    [data-testid="stRadio"] *,
+    [data-testid="stCheckbox"] * {
+        color: var(--ink);
+    }
+    [data-testid="stButton"] button,
+    [data-testid="stDownloadButton"] button,
+    button[kind="secondary"] {
+        background: #111c2b;
+        border: 1px solid var(--line);
+        color: var(--ink);
+    }
+    [data-testid="stButton"] button:hover,
+    [data-testid="stDownloadButton"] button:hover,
+    button[kind="secondary"]:hover {
+        background: #172437;
+        border-color: var(--teal);
+        color: var(--ink);
+    }
+    [data-testid="stExpander"] {
+        background: var(--paper-2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+    }
+    [data-testid="stDivider"] {
+        border-color: var(--line);
     }
     @media (max-width: 820px) {
         .metric-grid {
@@ -621,10 +842,14 @@ def metric_cards(items):
                 unsafe_allow_html=True)
 
 
-def dependency_pills():
+def dependency_pills(sign_model_available=False):
     pills = [
         ('Webcam ready' if WEBRTC_OK else 'Webcam fallback', WEBRTC_OK),
         ('MediaPipe hand tracking' if MP_OK else 'OpenCV hand detection', MP_OK),
+        ('Sign-word model ready' if sign_model_available else 'Fingerspelling model only',
+         sign_model_available),
+        ('Kokoro TTS ready' if kokoro_ready() else 'Browser TTS fallback',
+         kokoro_ready()),
         ('Microphone STT' if STT_OK else 'Typed input only', STT_OK),
         ('Translation ready' if TRANSLATE_OK else 'Translation offline', TRANSLATE_OK),
     ]
@@ -677,7 +902,7 @@ def show_result(pil_img, caption, force_box=False):
             <div class="confidence-track">
             <div class="confidence-fill" style="width:{conf*100:.1f}%"></div>
             </div>
-            <div style="color:#64727d;font-weight:700;text-align:center">
+            <div style="color:var(--muted);font-weight:700;text-align:center">
             Confidence {conf*100:.1f}%
             </div>
             </div>""",
@@ -744,6 +969,8 @@ WORDLIST = load_wordlist(os.path.join(APP_DIR, 'wordlist.txt'))
 LETTERS = [c for c in CLASSES if len(c) == 1]   # A–Z, for Practice mode
 METRICS = META.get('metrics') or {}
 MODEL_NAME = display_model_name(ARCH)
+SIGN_MODEL_PATH = os.path.join(APP_DIR, 'sign_model.pt')
+SIGN_WORDS_AVAILABLE = os.path.exists(SIGN_MODEL_PATH)
 
 with st.sidebar:
     st.success(MODEL_NAME)
@@ -764,6 +991,23 @@ with st.sidebar:
     FORCE_BOX = st.checkbox('Force a fixed centre box instead', value=False,
                             help='Use if detection misbehaves. Restart the '
                                  'camera after changing this.')
+    st.divider()
+    st.header('Speech')
+    if kokoro_ready():
+        st.success('Kokoro TTS')
+        voice_options = list(KOKORO_VOICE_CHOICES)
+        if KOKORO_VOICE not in voice_options:
+            voice_options.insert(0, KOKORO_VOICE)
+        KOKORO_VOICE = st.selectbox(
+            'Kokoro voice',
+            voice_options,
+            index=voice_options.index(KOKORO_VOICE),
+        )
+        KOKORO_SPEED = st.slider('Speech speed', 0.75, 1.25,
+                                 float(KOKORO_SPEED), 0.05)
+    else:
+        st.info('Browser TTS fallback')
+        st.caption('Add Kokoro model files under app/kokoro_models to enable offline speech.')
 
 st.markdown(
     f"""<div class="hero">
@@ -786,12 +1030,21 @@ metric_cards([
     ('External ASL validation', pct(METRICS.get('external_val_acc')), 'raw Mendeley holdout'),
     ('Autocomplete words', f'{len(WORDLIST):,}', 'live speller dictionary'),
 ])
-dependency_pills()
+dependency_pills(SIGN_WORDS_AVAILABLE)
 
-(tab_live, tab_signs, tab_snap, tab_upload, tab_video, tab_practice,
- tab_bridge, tab_urdu) = st.tabs(
-    ['Live Speller', 'Sign Words', 'Snapshot', 'Upload', 'Video',
-     'Practice', 'Bridge', 'English ⇄ Urdu'])
+tab_names = ['Live Speller', 'Snapshot', 'Upload', 'Video',
+             'Practice', 'Bridge', 'English ⇄ Urdu']
+if SIGN_WORDS_AVAILABLE:
+    tab_names.insert(1, 'Sign Words')
+tab_lookup = dict(zip(tab_names, st.tabs(tab_names)))
+tab_live = tab_lookup['Live Speller']
+tab_signs = tab_lookup.get('Sign Words')
+tab_snap = tab_lookup['Snapshot']
+tab_upload = tab_lookup['Upload']
+tab_video = tab_lookup['Video']
+tab_practice = tab_lookup['Practice']
+tab_bridge = tab_lookup['Bridge']
+tab_urdu = tab_lookup['English ⇄ Urdu']
 
 # ---------------------------------------------------------------- Live -----
 with tab_live:
@@ -855,45 +1108,42 @@ with tab_live:
                 unsafe_allow_html=True,
             )
 
-# ----------------------------------------------------------- Sign Words ----
-with tab_signs:
-    section_header('Dynamic ASL', 'Sign Words',
-                   'Word-level sign recognition is enabled when a dynamic model is present.')
-    sign_model_path = os.path.join(APP_DIR, 'sign_model.pt')
+if tab_signs is not None:
+    # ------------------------------------------------------- Sign Words ----
+    with tab_signs:
+        section_header('Dynamic ASL', 'Sign Words',
+                       'Word-level sign recognition from a bundled dynamic model.')
 
-    if not WEBRTC_OK:
-        empty_state('Webcam unavailable',
-                    'Install streamlit-webrtc and OpenCV to enable this page.')
-    elif not os.path.exists(sign_model_path):
-        empty_state('Dynamic model not installed',
-                    'Record signs with scripts/collect_signs.py, train notebooks/04_dynamic_signs.ipynb, then place app/sign_model.pt here.')
-    elif not MP_OK:
-        empty_state('MediaPipe unavailable',
-                    'Run on a Python version with a MediaPipe wheel to enable dynamic signs.')
-    else:
-        sctx = webrtc_streamer(
-            key='asl-signs',
-            mode=WebRtcMode.SENDRECV,
-            video_processor_factory=lambda: SignWordProcessor(sign_model_path),
-            media_stream_constraints={'video': True, 'audio': False},
-            rtc_configuration={'iceServers': [
-                {'urls': ['stun:stun.l.google.com:19302']}]},
-            async_processing=True,
-        )
-        if sctx.video_processor:
-            svp = sctx.video_processor
-            b1, b2 = st.columns(2)
-            if b1.button('🔊 Speak sentence'):
-                speak(' '.join(s.replace('_', ' ') for s in svp.sentence))
-            if b2.button('🗑️ Clear sentence'):
-                with svp.lock:
-                    svp.sentence = []
-            with svp.lock:
-                line = ' '.join(s.replace('_', ' ') for s in svp.sentence)
-            st.markdown(
-                f'<div class="large-output">{escape(line or "Waiting for signs")}</div>',
-                unsafe_allow_html=True,
+        if not WEBRTC_OK:
+            empty_state('Webcam unavailable',
+                        'Install streamlit-webrtc and OpenCV to enable this page.')
+        elif not MP_OK:
+            empty_state('MediaPipe unavailable',
+                        'Set ASL_ENABLE_MEDIAPIPE=1 in an environment with a stable MediaPipe install.')
+        else:
+            sctx = webrtc_streamer(
+                key='asl-signs',
+                mode=WebRtcMode.SENDRECV,
+                video_processor_factory=lambda: SignWordProcessor(SIGN_MODEL_PATH),
+                media_stream_constraints={'video': True, 'audio': False},
+                rtc_configuration={'iceServers': [
+                    {'urls': ['stun:stun.l.google.com:19302']}]},
+                async_processing=True,
             )
+            if sctx.video_processor:
+                svp = sctx.video_processor
+                b1, b2 = st.columns(2)
+                if b1.button('🔊 Speak sentence'):
+                    speak(' '.join(s.replace('_', ' ') for s in svp.sentence))
+                if b2.button('🗑️ Clear sentence'):
+                    with svp.lock:
+                        svp.sentence = []
+                with svp.lock:
+                    line = ' '.join(s.replace('_', ' ') for s in svp.sentence)
+                st.markdown(
+                    f'<div class="large-output">{escape(line or "Waiting for signs")}</div>',
+                    unsafe_allow_html=True,
+                )
 
 # ------------------------------------------------------------ Snapshot -----
 with tab_snap:
@@ -1105,14 +1355,14 @@ with tab_urdu:
                 s_cls = 'large-output urdu' if src == 'ur' else 'large-output'
                 s_dir = " dir='rtl'" if src == 'ur' else ''
                 st.markdown(
-                    f"<div style='color:#64727d;font-size:.9rem;font-weight:700'>{src_name}</div>"
+                    f"<div style='color:var(--muted);font-size:.9rem;font-weight:700'>{src_name}</div>"
                     f"<div class='{s_cls}'{s_dir} style='font-size:1.35rem'>{escape(text)}</div>",
                     unsafe_allow_html=True)
                 st.markdown('')
                 t_cls = 'large-output urdu' if tgt == 'ur' else 'large-output'
                 t_dir = " dir='rtl'" if tgt == 'ur' else ''
                 st.markdown(
-                    f"<div style='color:#64727d;font-size:.9rem;font-weight:700'>{tgt_name}</div>"
+                    f"<div style='color:var(--muted);font-size:.9rem;font-weight:700'>{tgt_name}</div>"
                     f"<div class='{t_cls}'{t_dir} style='font-size:2.1rem'>{escape(translated)}</div>",
                     unsafe_allow_html=True)
                 if st.button(f'🔊 Speak the {tgt_name}'):

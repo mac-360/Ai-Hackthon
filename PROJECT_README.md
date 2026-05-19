@@ -9,7 +9,9 @@
 
 A system that recognises **American Sign Language** — the 26-letter
 fingerspelling alphabet (plus `space`, `del`, `nothing`) from images and live
-video, **and** dynamic word-level signs — turning them into text and speech.
+video — turning it into text and speech. The dynamic word-sign pipeline is
+kept as an optional extension path, but no trained dynamic checkpoint is
+bundled in the submission.
 
 ---
 
@@ -50,37 +52,46 @@ benchmark-only submissions have been removed.
 ## 📱 The product — a communication tool, not just a classifier
 
 The `app/` folder is a **Streamlit app** that turns the model into something
-usable — **8 tabs**:
+usable — **7 bundled tabs**:
 
 | Tab | What it does |
 |---|---|
 | 📹 **Live Speller** | Real-time webcam — detects the hand, recognises fingerspelling, builds words with **predictive autocomplete**, speaks them aloud. |
-| 🧏 **Sign Words** | Real-time recognition of *dynamic*, word-level ASL signs (HELLO, THANK YOU…) — MediaPipe Holistic + an LSTM — built into a sentence. |
 | 📸 **Snapshot** | Take one photo → instant letter. |
 | 🖼️ **Upload** | Classify any hand-sign image. |
 | 🎬 **Translate Video** | Upload a fingerspelling video → it reads it frame by frame and translates it into text. |
 | 🎓 **Practice** | Learn the alphabet — shown a letter + reference, you sign it, it scores you. |
-| 🔁 **Communication Bridge** | Speech / text → ASL fingerspelling + speech — bridges all three modalities, both directions. |
+| 🔁 **Communication Bridge** | Speech / text → ASL fingerspelling + Kokoro/browser speech — bridges all three modalities, both directions. |
 | 🌐 **English ⇄ Urdu** | Type or speak → translate between English and Urdu in proper script, both ways, with speech. |
+
+If a trained `app/sign_model.pt` dynamic-sign checkpoint is added later, the
+app reveals an extra **Sign Words** tab for MediaPipe-Holistic + LSTM
+word-sign recognition.
 
 It **detects the hand** before classifying — **MediaPipe** where available,
 otherwise OpenCV skin-segmentation with optional **background calibration**
 (detects the hand by what changed, so it works even against a same-coloured
 wall).
 
+English speech uses offline Kokoro TTS when `app/kokoro_models/kokoro-v1.0.onnx`
+and `app/kokoro_models/voices-v1.0.bin` are present. The app falls back to the
+browser Web Speech API when Kokoro is unavailable or the language is not
+supported.
+
 ## 📂 Repository
 
 ```
 .
 ├── app/                       # the Streamlit app — self-contained & deployable
-│   ├── app.py                 #   8-tab app: spell · sign words · video · bridge · Urdu …
+│   ├── app.py                 #   app: spell · video · practice · bridge · Urdu …
 │   ├── hand_detection.py      #   MediaPipe / skin-seg / background-subtraction
 │   ├── video_translate.py     #   fingerspelling-video → text
 │   ├── sign_recognition.py    #   dynamic word-level sign LSTM + live recogniser
 │   ├── best_model.pt          #   improved shift-robust ConvNeXt-Tiny checkpoint
-│   ├── sign_model.pt          #   dynamic-sign LSTM (created by notebooks/04)
+│   ├── sign_model.pt          #   optional dynamic-sign LSTM, not bundled
 │   ├── reference_signs/       #   29 reference images (Practice mode)
 │   ├── wordlist.txt           #   autocomplete dictionary
+│   ├── kokoro_models/         #   optional local Kokoro ONNX + voices
 │   └── requirements.txt
 ├── notebooks/                 # dynamic-sign notebook only
 │   └── 04_dynamic_signs.ipynb
@@ -116,20 +127,20 @@ Hugging Face Space.
 
 ## ⚠️ Limitations (and we mean it)
 
-- **Vocabulary.** The core model covers the 26-letter alphabet; the *Sign
-  Words* tab adds ~15 dynamic signs. Real ASL is a full language — thousands
-  of signs, facial grammar, context — so this remains a slice of it.
+- **Vocabulary.** The core model covers the 26-letter alphabet. Real ASL is a
+  full language — thousands of signs, facial grammar, context — so this remains
+  a slice of it.
 - **Dataset bias.** The alphabet training images are one hand, one
-  background, even lighting; the dynamic signs are a small, mostly
-  single-signer set. Both inherit those assumptions.
+  background, and even lighting. The improved model is stress-tested beyond
+  that setting, but it still inherits those assumptions.
 - **Real-world gap.** The active model is more robust to lighting, background,
   and hand-scale shift, but hand-cropping still matters for webcam use.
 
 ## 🔭 Future work
 
-1. **Scale the dynamic vocabulary** — the *Sign Words* tab proves the
-   MediaPipe-Holistic + LSTM approach on ~15 signs; more signers and more
-   signs would extend it toward conversational ASL.
+1. **Train and bundle the dynamic vocabulary** — the MediaPipe-Holistic + LSTM
+   code path is present, but it needs a real `app/sign_model.pt` checkpoint
+   from more signers and more signs before it should be shown in the demo.
 2. **Continuous signing** — segment a stream of signs into sentences, rather
    than recognising one isolated sign at a time.
 3. **Diverse data** — many hands, skin tones, backgrounds and lighting so the

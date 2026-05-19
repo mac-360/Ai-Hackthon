@@ -8,3 +8,4 @@ __pycache__/
 _test_clip.avi
 data/
 *.zip
+app/kokoro_models/
